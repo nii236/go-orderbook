@@ -16,6 +16,7 @@ var ErrOrderNotExist = errors.New("order does not exist")
 var ErrOrderQueueNotExist = errors.New("order queue does not exist")
 var ErrEmptyOrder = errors.New("malformed order")
 var ErrInvalidSide = errors.New("invalid side")
+var ErrNoError = errors.New("no error collected, no rollback needed")
 
 type OrderType string
 
@@ -166,24 +167,25 @@ func (ob *Orderbook) Run() {
 					ob.errors <- err
 					continue
 				}
+
+				undo := &Undo{}
+				defer undo.Rollback()
 				if result.Remaining != nil && result.Remaining.Quantity > 0 {
-					err = ob.orderUpsert(*result.Remaining)
+					err = ob.orderUpsert(*result.Remaining, false, undo)
 					if err != nil {
 						ob.errors <- err
 						continue
 					}
-
 				}
 				for _, filledOrder := range result.Filled {
-					err = ob.orderRemove(filledOrder)
+					err = ob.orderRemove(filledOrder, undo)
 					if err != nil {
 						ob.errors <- err
 						continue
 					}
-
 				}
 				if result.Partial != nil {
-					err = ob.orderUpsert(*result.Partial)
+					err = ob.orderUpsert(*result.Partial, true, undo)
 					if err != nil {
 						ob.errors <- err
 						continue
@@ -349,57 +351,101 @@ type Trade struct {
 	Amount     uint64
 }
 
-func (ob *Orderbook) orderUpsert(o Order) error {
+type undoFn func()
+
+var emptyUndo undoFn = func() {}
+
+type Undo struct {
+	fns      []undoFn
+	hasError bool
+}
+
+func (u *Undo) HasError() {
+	u.hasError = true
+}
+func (u *Undo) Append(fn func()) {
+	u.fns = append(u.fns, fn)
+}
+func (u *Undo) Rollback() error {
+	if u.hasError {
+		return ErrNoError
+	}
+	for i := len(u.fns) - 1; i >= 0; i-- {
+		u.fns[i]()
+	}
+	return nil
+}
+
+func (ob *Orderbook) orderUpsert(o Order, isUpdate bool, undoFns *Undo) error {
 	switch o.Type {
 	case LimitBuy:
 		oq, exists := ob.bids.Entries.Get(o.Price)
 		if !exists {
 			ob.bids.Entries = ob.bids.Entries.Insert(o.Price, oq)
+			undoFns.Append(func() { ob.bids.Entries = ob.bids.Entries.Remove(o.Price) })
 		}
-		_, exists = oq.Entries.Get(o.ID)
+		original, exists := oq.Entries.Get(o.ID)
 		if !exists {
+			undoFns.HasError()
 			return fmt.Errorf("get order: %w", ErrOrderNotExist)
 		}
 		oq.Entries = oq.Entries.Insert(o.ID, o)
+		if isUpdate {
+			undoFns.Append(func() { oq.Entries = oq.Entries.Insert(o.ID, original) })
+		} else {
+			undoFns.Append(func() { oq.Entries = oq.Entries.Remove(o.ID) })
+		}
 		return nil
 	case LimitSell:
 		oq, exists := ob.asks.Entries.Get(o.Price)
 		if !exists {
 			ob.asks.Entries = ob.asks.Entries.Insert(o.Price, oq)
 		}
-		_, exists = oq.Entries.Get(o.ID)
+		original, exists := oq.Entries.Get(o.ID)
 		if !exists {
+			undoFns.HasError()
 			return fmt.Errorf("get order: %w", ErrOrderNotExist)
 		}
 		oq.Entries = oq.Entries.Insert(o.ID, o)
+		if isUpdate {
+			undoFns.Append(func() { oq.Entries = oq.Entries.Insert(o.ID, original) })
+		} else {
+			undoFns.Append(func() { oq.Entries = oq.Entries.Remove(o.ID) })
+		}
 		return nil
 	default:
 		return ErrInvalidSide
 	}
 }
-func (ob *Orderbook) orderRemove(o Order) error {
+func (ob *Orderbook) orderRemove(o Order, undoFns *Undo) error {
 	switch o.Type {
 	case LimitBuy:
 		oq, exists := ob.bids.Entries.Get(o.Price)
 		if !exists {
+			undoFns.HasError()
 			return fmt.Errorf("get orderqueue: %w", ErrOrderNotExist)
 		}
 		_, exists = oq.Entries.Get(o.ID)
 		if !exists {
+			undoFns.HasError()
 			return fmt.Errorf("get order: %w", ErrOrderNotExist)
 		}
 		oq.Entries = oq.Entries.Remove(o.ID)
+		undoFns.Append(func() { oq.Entries = oq.Entries.Insert(o.ID, o) })
 		return nil
 	case LimitSell:
 		oq, exists := ob.asks.Entries.Get(o.Price)
 		if !exists {
+			undoFns.HasError()
 			return fmt.Errorf("get orderqueue: %w", ErrOrderNotExist)
 		}
 		_, exists = oq.Entries.Get(o.ID)
 		if !exists {
+			undoFns.HasError()
 			return fmt.Errorf("get order: %w", ErrOrderNotExist)
 		}
 		oq.Entries = oq.Entries.Remove(o.ID)
+		undoFns.Append(func() { oq.Entries = oq.Entries.Insert(o.ID, o) })
 		return nil
 	default:
 		return ErrInvalidSide

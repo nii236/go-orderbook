@@ -27,18 +27,10 @@ func TestOrderbook_Asks(t *testing.T) {
 		ID:        2,
 		Type:      ob.LimitSell,
 		Quantity:  1,
-		Price:     105,
+		Price:     102,
 		CreatedAt: time.Now(),
 	})
 	assert.Nil(t, err)
-	// err = book.Add(&ob.Order{
-	// 	ID:        3,
-	// 	Type:      ob.LimitSell,
-	// 	Quantity:  10,
-	// 	Price:     105,
-	// 	CreatedAt: time.Now(),
-	// })
-	// assert.Nil(t, err)
 	fmt.Println(book)
 }
 func TestOrderbook_LimitSell(t *testing.T) {
