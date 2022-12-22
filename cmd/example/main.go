@@ -108,9 +108,18 @@ func main() {
 	}()
 	go func() {
 		for {
+
 			mutex.Lock()
+			targetPrice, err := book.HighestBid()
+			if err != nil {
+				targetPrice = 100
+			}
 			qty := uint64(rand.Intn(20)) + 1
-			price := 90 + uint64(rand.Intn(20))
+			price := targetPrice - 20 + uint64(rand.Intn(30))
+			if price > 110 || price < 90 {
+				price = 100
+			}
+			book.HighestBid()
 			trades, err := book.Add(&ob.Order{
 				ID:        orderID.Add(1),
 				Type:      ob.Ask,
@@ -139,8 +148,15 @@ func main() {
 	go func() {
 		for {
 			mutex.Lock()
+			targetPrice, err := book.LowestAsk()
+			if err != nil {
+				targetPrice = 100
+			}
 			qty := uint64(rand.Intn(20)) + 1
-			price := 90 + uint64(rand.Intn(20))
+			price := targetPrice + 20 - uint64(rand.Intn(35))
+			if price > 110 || price < 90 {
+				price = 100
+			}
 			trades, err := book.Add(&ob.Order{
 				ID:        orderID.Add(1),
 				Type:      ob.Bid,

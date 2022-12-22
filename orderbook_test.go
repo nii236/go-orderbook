@@ -1,7 +1,6 @@
 package orderbook_test
 
 import (
-	"fmt"
 	"math/rand"
 	ob "orderbook"
 
@@ -173,7 +172,6 @@ func TestOrderbook_PartialFilledBid(t *testing.T) {
 	assert.EqualValues(t, 1, bidSize, "need more bids")
 	assert.EqualValues(t, 0, askSize, "need zero asks")
 	assert.Equal(t, 2, len(trades), "expected 2 trade")
-	fmt.Println(book)
 }
 func TestOrderbook_FilledBid(t *testing.T) {
 	book := ob.NewOrderbook("TEST")
@@ -223,7 +221,6 @@ func TestOrderbook_PartialFilledAsk(t *testing.T) {
 	assert.Nil(t, err)
 	bidSize, _ := book.Bids()
 	askSize, _ := book.Asks()
-	fmt.Println(book)
 	assert.EqualValues(t, 1, askSize, "need more asks")
 	assert.EqualValues(t, 0, bidSize, "need zero bids")
 	assert.Equal(t, 2, len(trades), "expected 1 trade")

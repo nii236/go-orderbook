@@ -118,12 +118,12 @@ func (ob *Orderbook) String() string {
 }
 
 func (ob *Orderbook) processLimitSell(ctx context.Context, o *Order) ([]Trade, error) {
-	highestBid, err := ob.highestBid()
+	highestBid, err := ob.HighestBid()
 	if err != nil && !errors.Is(err, ErrNoLiquidity) {
 		WithError(ctx)
 		return nil, fmt.Errorf("process limit sell: %w", err)
 	}
-	if err == ErrNoLiquidity || o.Price > highestBid.Price {
+	if err == ErrNoLiquidity || o.Price > highestBid {
 		// No matching orders required
 		ob.orderInsert(ctx, *o)
 		return []Trade{}, nil
@@ -155,6 +155,9 @@ func (ob *Orderbook) processLimitSell(ctx context.Context, o *Order) ([]Trade, e
 }
 
 func (ob *Orderbook) Add(o *Order) ([]Trade, error) {
+	if o.Quantity <= 0 {
+		return []Trade{}, ErrEmptyOrder
+	}
 
 	// fmt.Printf("[%s] add order #%d: %d @ %d USD\n", o.Type, o.ID, o.Quantity, o.Price)
 	tradesCh := make(chan []Trade)
@@ -271,12 +274,12 @@ func (ob *Orderbook) Asks() (uint64, []Order) {
 }
 
 func (ob *Orderbook) processLimitBuy(ctx context.Context, o *Order) ([]Trade, error) {
-	lowestAsk, err := ob.lowestAsk()
+	lowestAsk, err := ob.LowestAsk()
 	if err != nil && !errors.Is(err, ErrNoLiquidity) {
 		WithError(ctx)
 		return nil, fmt.Errorf("lowest ask: %w", err)
 	}
-	if err == ErrNoLiquidity || o.Price < lowestAsk.Price {
+	if err == ErrNoLiquidity || o.Price < lowestAsk {
 
 		// No matching orders required
 		ob.orderInsert(ctx, *o)
@@ -517,7 +520,6 @@ func (ob *Orderbook) orderInsert(ctx context.Context, o Order) {
 			ob.bids.Entries = ob.bids.Entries.Insert(o.Price, oq)
 		}
 		oq.Entries = oq.Entries.Insert(o.ID, o)
-		ob.bids.Entries = ob.bids.Entries.Insert(o.Price, oq)
 		oq.Size += o.Quantity
 		ob.bids.Entries = ob.bids.Entries.Insert(o.Price, oq)
 		WithOp(ctx, func() { oq.Entries = oq.Entries.Remove(o.ID) })
@@ -527,7 +529,6 @@ func (ob *Orderbook) orderInsert(ctx context.Context, o Order) {
 			ob.asks.Entries = ob.asks.Entries.Insert(o.Price, oq)
 		}
 		oq.Entries = oq.Entries.Insert(o.ID, o)
-		ob.asks.Entries = ob.asks.Entries.Insert(o.Price, oq)
 		oq.Size += o.Quantity
 		ob.asks.Entries = ob.asks.Entries.Insert(o.Price, oq)
 		WithOp(ctx, func() { oq.Entries = oq.Entries.Remove(o.ID) })
@@ -548,7 +549,6 @@ func (ob *Orderbook) orderUpdate(ctx context.Context, o Order) error {
 			return fmt.Errorf("get order %d: %w", o.ID, ErrOrderNotExist)
 		}
 		oq.Entries = oq.Entries.Insert(o.ID, o)
-		ob.bids.Entries = ob.bids.Entries.Insert(o.Price, oq)
 		oq.Size -= original.Quantity - o.Quantity
 		ob.bids.Entries = ob.bids.Entries.Insert(o.Price, oq)
 		WithOp(ctx, func() { oq.Entries = oq.Entries.Insert(o.ID, original) })
@@ -563,7 +563,6 @@ func (ob *Orderbook) orderUpdate(ctx context.Context, o Order) error {
 			return fmt.Errorf("get order %d: %w", o.ID, ErrOrderNotExist)
 		}
 		oq.Entries = oq.Entries.Insert(o.ID, o)
-		ob.asks.Entries = ob.asks.Entries.Insert(o.Price, oq)
 		oq.Size -= original.Quantity - o.Quantity
 		ob.asks.Entries = ob.asks.Entries.Insert(o.Price, oq)
 		WithOp(ctx, func() { oq.Entries = oq.Entries.Insert(o.ID, original) })
@@ -587,7 +586,6 @@ func (ob *Orderbook) orderRemove(ctx context.Context, o Order) error {
 			return fmt.Errorf("get order %d: %w", o.ID, ErrOrderNotExist)
 		}
 		oq.Entries = oq.Entries.Remove(o.ID)
-		ob.bids.Entries = ob.bids.Entries.Insert(o.Price, oq)
 		oq.Size -= o.Quantity
 		ob.bids.Entries = ob.bids.Entries.Insert(o.Price, oq)
 		WithOp(ctx, func() { oq.Entries = oq.Entries.Insert(o.ID, o) })
@@ -604,7 +602,6 @@ func (ob *Orderbook) orderRemove(ctx context.Context, o Order) error {
 			return fmt.Errorf("get order %d: %w", o.ID, ErrOrderNotExist)
 		}
 		oq.Entries = oq.Entries.Remove(o.ID)
-		ob.asks.Entries = ob.asks.Entries.Insert(o.Price, oq)
 		oq.Size -= o.Quantity
 		ob.asks.Entries = ob.asks.Entries.Insert(o.Price, oq)
 		WithOp(ctx, func() { oq.Entries = oq.Entries.Insert(o.ID, o) })
@@ -614,17 +611,17 @@ func (ob *Orderbook) orderRemove(ctx context.Context, o Order) error {
 	}
 }
 
-func (ob *Orderbook) highestBid() (Order, error) {
+func (ob *Orderbook) HighestBid() (uint64, error) {
 	if ob.bids.Entries.Len() <= 0 {
-		return Order{}, ErrNoLiquidity
+		return 0, ErrNoLiquidity
 	}
-	return ob.bids.Entries.Max().V.Entries.Min().V, nil
+	return ob.bids.Entries.Max().V.Entries.Min().V.Price, nil
 }
-func (ob *Orderbook) lowestAsk() (Order, error) {
+func (ob *Orderbook) LowestAsk() (uint64, error) {
 	if ob.asks.Entries.Len() <= 0 {
-		return Order{}, ErrNoLiquidity
+		return 0, ErrNoLiquidity
 	}
-	return ob.asks.Entries.Min().V.Entries.Min().V, nil
+	return ob.asks.Entries.Min().V.Entries.Min().V.Price, nil
 }
 
 func (ob *Orderbook) Cancel(o *Order) error {
