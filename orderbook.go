@@ -1,8 +1,10 @@
 package orderbook
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/edofic/go-ordmap/v2"
@@ -20,21 +22,9 @@ var ErrNoError = errors.New("no error collected, no rollback needed")
 
 type OrderType string
 
-const LimitBuy OrderType = "LIMIT_BUY"
-const LimitSell OrderType = "LIMIT_SELL"
-const MarketBuy OrderType = "MARKET_BUY"
-const MarketSell OrderType = "MARKET_SELL"
+const Bid OrderType = "BUY"
+const Ask OrderType = "SELL"
 
-type LimitNode struct {
-	LimitPrice  uint64
-	Size        uint64
-	TotalVolume uint64
-	Parent      *LimitNode
-	LeftChild   *LimitNode
-	RightChild  *LimitNode
-	HeadOrder   *Order
-	TailOrder   *Order
-}
 type CancelOrder struct {
 	ID    uint64
 	Type  OrderType
@@ -49,10 +39,12 @@ type Order struct {
 }
 
 type OrderQueue struct {
+	// Size    uint64
 	Entries ordmap.NodeBuiltin[uint64, Order]
 }
 
 type PriceMap struct {
+	Size    uint64
 	Entries ordmap.NodeBuiltin[uint64, OrderQueue]
 }
 
@@ -67,40 +59,27 @@ func NewPriceMap(entries []*Order) *PriceMap {
 }
 
 type Orderbook struct {
-	Symbol  string
-	started bool
-
+	Symbol string
 	bids   *PriceMap
 	asks   *PriceMap
-	add    chan (*Order)
-	cancel chan (*CancelOrder)
-	stop   chan (bool)
-	errors chan (error)
 }
 
-func NewOrderbook(symbol string, bids *PriceMap, asks *PriceMap) *Orderbook {
-	add := make(chan *Order)
-	cancel := make(chan *CancelOrder)
-	stop := make(chan bool)
-	errors := make(chan error)
+type RequestType string
+
+const RequestCancel RequestType = "REQUEST_CANCEL"
+const RequestAdd RequestType = "REQUEST_ADD"
+
+type Request struct {
+	Type  RequestType
+	Order *Order
+}
+
+func NewOrderbook(symbol string) *Orderbook {
 	return &Orderbook{
 		Symbol: symbol,
-		bids:   bids,
-		asks:   asks,
-		add:    add,
-		cancel: cancel,
-		stop:   stop,
-		errors: errors,
+		bids:   NewPriceMap([]*Order{}),
+		asks:   NewPriceMap([]*Order{}),
 	}
-}
-
-// Reset the orderbook, emptying out all bids and asks.
-func (ob *Orderbook) Reset() {
-	ob.add = make(chan *Order)
-	ob.cancel = make(chan *CancelOrder)
-	ob.errors = make(chan error)
-	ob.asks = &PriceMap{}
-	ob.bids = &PriceMap{}
 }
 
 func (ob *Orderbook) String() string {
@@ -127,124 +106,142 @@ func (ob *Orderbook) String() string {
 	return result
 }
 
-func (ob *Orderbook) Stop() {
-	if !ob.started {
-		return
+func (ob *Orderbook) processLimitSell(ctx context.Context, o *Order) ([]Trade, error) {
+	highestBid, err := ob.highestBid()
+	if err != nil && !errors.Is(err, ErrNoLiquidity) {
+		WithError(ctx)
+		return nil, fmt.Errorf("process limit sell: %w", err)
 	}
-	ob.stop <- true
-}
+	if err == ErrNoLiquidity || o.Price > highestBid.Price {
+		// No matching orders required
+		err = ob.orderInsert(ctx, *o)
+		if err != nil && !errors.Is(err, ErrNoLiquidity) {
+			WithError(ctx)
+			return nil, fmt.Errorf("process limit sell: %w", err)
+		}
+		return []Trade{}, nil
+	}
 
-// Run the service
-func (ob *Orderbook) Run() {
-	ob.started = true
-	for {
-		select {
-		case <-ob.stop:
-			fmt.Println("stopping")
-			return
-		case o := <-ob.add:
-			switch o.Type {
-			case LimitBuy:
-				ob.errors <- ob.processLimitBuy(o)
-			case LimitSell:
-				highestBid, err := ob.highestBid()
-				if err != nil && !errors.Is(err, ErrNoLiquidity) {
-					ob.errors <- fmt.Errorf("process limit sell: %w", err)
-					continue
-				}
-				if err == ErrNoLiquidity || o.Price > highestBid.Price {
-					// No matching orders required
-					askQueue, _ := ob.asks.Entries.Get(o.Price)
-					askQueue.Entries = askQueue.Entries.Insert(o.ID, *o)
-					ob.asks.Entries = ob.asks.Entries.Insert(o.Price, askQueue)
-					ob.errors <- nil
-					continue
-				}
+	// Matching orders required
+	result, err := ob.calculateLimitSell(o)
+	if err != nil {
+		WithError(ctx)
+		return nil, err
+	}
 
-				// Matching orders needed
-				result, err := ob.calculateLimitSell(o)
-				if err != nil {
-					ob.errors <- err
-					continue
-				}
-
-				undo := &Undo{}
-				defer undo.Rollback()
-				if result.Remaining != nil && result.Remaining.Quantity > 0 {
-					err = ob.orderUpsert(*result.Remaining, false, undo)
-					if err != nil {
-						ob.errors <- err
-						continue
-					}
-				}
-				for _, filledOrder := range result.Filled {
-					err = ob.orderRemove(filledOrder, undo)
-					if err != nil {
-						ob.errors <- err
-						continue
-					}
-				}
-				if result.Partial != nil {
-					err = ob.orderUpsert(*result.Partial, true, undo)
-					if err != nil {
-						ob.errors <- err
-						continue
-					}
-				}
-
-				ob.errors <- err
-				continue
-			case MarketBuy:
-				ob.errors <- ob.processMarketBuy(o)
-			case MarketSell:
-				ob.errors <- ob.processMarketSell(o)
-			default:
-				continue
-			}
-		case o := <-ob.cancel:
-			ob.errors <- ob.processCancel(o)
+	// Persist result
+	if result.Remaining != nil && result.Remaining.Quantity > 0 {
+		err = ob.orderInsert(ctx, *result.Remaining)
+		if err != nil {
+			WithError(ctx)
+			return nil, err
+		}
+	}
+	for _, filledOrder := range result.Filled {
+		err = ob.orderRemove(ctx, filledOrder)
+		if err != nil {
+			WithError(ctx)
+			return nil, err
+		}
+	}
+	if result.Partial != nil {
+		err = ob.orderUpdate(ctx, *result.Partial)
+		if err != nil {
+			WithError(ctx)
+			return nil, err
 		}
 	}
 
+	return result.Trades, nil
 }
 
-func (ob *Orderbook) Add(o *Order) error {
+// func (ob *Orderbook) Add(o *Order) {
+// 	fn := func(o *Order) {}
+// 	<-fn
+// }
+
+func (ob *Orderbook) Add(o *Order) ([]Trade, error) {
+	ctx := WithUndo(context.Background())
+	defer Rollback(ctx)
 	if o == nil {
-		return ErrEmptyOrder
+		return nil, ErrEmptyOrder
 	}
-	if o.Type == LimitBuy {
+	switch o.Type {
+	case Bid:
 		bidQueue, _ := ob.bids.Entries.Get(o.Price)
 		_, exists := bidQueue.Entries.Get(o.ID)
 		if exists {
-			return ErrOrderExists
+			return nil, fmt.Errorf("get bid queue: %w", ErrOrderExists)
 		}
+		trades, err := ob.processLimitBuy(ctx, o)
+		if err != nil {
+			return nil, fmt.Errorf("process limit buy: %w", err)
+		}
+		ob.bids.Size += o.Quantity
+		for _, trade := range trades {
+			ob.bids.Size -= trade.Amount
+			ob.asks.Size -= trade.Amount
+		}
+
+		// Cleanup empty maps
+		bidQueue, bidQueueExists := ob.bids.Entries.Get(o.Price)
+		if bidQueueExists && bidQueue.Entries.Len() == 0 {
+			ob.bids.Entries = ob.bids.Entries.Remove(o.Price)
+		}
+		for _, trade := range trades {
+			askQueue, askQueueExists := ob.asks.Entries.Get(trade.Price)
+			if askQueueExists && askQueue.Entries.Len() == 0 {
+				ob.asks.Entries = ob.asks.Entries.Remove(trade.Price)
+			}
+		}
+
+		return trades, nil
+	case Ask:
+		askQueue, _ := ob.asks.Entries.Get(o.Price)
+		_, exists := askQueue.Entries.Get(o.ID)
+		if exists {
+			return nil, fmt.Errorf("get ask queue: %w", ErrOrderExists)
+
+		}
+		trades, err := ob.processLimitSell(ctx, o)
+		if err != nil {
+			return nil, fmt.Errorf("process limit sell: %w", err)
+		}
+		ob.asks.Size += o.Quantity
+		for _, trade := range trades {
+			ob.asks.Size -= trade.Amount
+			ob.bids.Size -= trade.Amount
+		}
+		// Cleanup empty maps
+		askQueue, askQueueExists := ob.asks.Entries.Get(o.Price)
+		if askQueueExists && askQueue.Entries.Len() == 0 {
+			ob.asks.Entries = ob.asks.Entries.Remove(o.Price)
+		}
+		for _, trade := range trades {
+			bidQueue, bidQueueExists := ob.bids.Entries.Get(trade.Price)
+			if bidQueueExists && bidQueue.Entries.Len() == 0 {
+				ob.bids.Entries = ob.bids.Entries.Remove(trade.Price)
+			}
+		}
+		return trades, nil
+	default:
+		return nil, ErrInvalidSide
 	}
-	ob.add <- o
-	err := <-ob.errors
-	return err
-}
-func (ob *Orderbook) Cancel(o *CancelOrder) error {
-	if o == nil {
-		return ErrEmptyOrder
-	}
-	ob.cancel <- o
-	return <-ob.errors
 }
 
-func (ob *Orderbook) Bids() []Order {
+func (ob *Orderbook) Bids() (uint64, []Order) {
 	result := []Order{}
 	bidQueue := ob.bids.Entries.Iterate()
 	for i := bidQueue; !i.Done(); i.Next() {
 		orderQueue := i.GetValue().Entries.Iterate()
 		for j := orderQueue; !j.Done(); j.Next() {
-			fmt.Println(j.GetKey(), j.GetValue())
 			result = append(result, j.GetValue())
 		}
 	}
-	return result
+	return ob.bids.Size, result
 }
 
-func (ob *Orderbook) Asks() []Order {
+func (ob *Orderbook) Asks() (uint64, []Order) {
 	result := []Order{}
 	askQueue := ob.asks.Entries
 	for i := askQueue.Iterate(); !i.Done(); i.Next() {
@@ -253,26 +250,144 @@ func (ob *Orderbook) Asks() []Order {
 			result = append(result, j.GetValue())
 		}
 	}
-	return result
+	return ob.asks.Size, result
 }
 
-func (ob *Orderbook) processLimitBuy(o *Order) error {
-	oq, exists := ob.bids.Entries.Get(o.Price)
-	if !exists {
-		return ErrOrderQueueNotExist
+func (ob *Orderbook) processLimitBuy(ctx context.Context, o *Order) ([]Trade, error) {
+	lowestAsk, err := ob.lowestAsk()
+	if err != nil && !errors.Is(err, ErrNoLiquidity) {
+		WithError(ctx)
+		return nil, fmt.Errorf("lowest ask: %w", err)
 	}
-	oq.Entries.Insert(o.ID, *o)
-	return nil
+	if err == ErrNoLiquidity || o.Price < lowestAsk.Price {
+
+		// No matching orders required
+		err = ob.orderInsert(ctx, *o)
+		if err != nil && !errors.Is(err, ErrNoLiquidity) {
+			WithError(ctx)
+			return nil, fmt.Errorf("insert order: %w", err)
+		}
+		return []Trade{}, nil
+	}
+	// Matching orders required
+	result, err := ob.calculateLimitBuy(o)
+	if err != nil {
+		WithError(ctx)
+		return nil, fmt.Errorf("calculate result: %w", err)
+	}
+
+	// Persist result
+	if result.Remaining != nil && result.Remaining.Quantity > 0 {
+		err = ob.orderInsert(ctx, *result.Remaining)
+		if err != nil {
+			WithError(ctx)
+			return nil, fmt.Errorf("insert order: %w", err)
+		}
+	}
+	for _, filledOrder := range result.Filled {
+		err = ob.orderRemove(ctx, filledOrder)
+		if err != nil {
+			WithError(ctx)
+			return nil, fmt.Errorf("remove filled order: %w", err)
+		}
+	}
+	if result.Partial != nil {
+		err = ob.orderUpdate(ctx, *result.Partial)
+		if err != nil {
+			WithError(ctx)
+			return nil, fmt.Errorf("update partially filled order: %w", err)
+		}
+	}
+
+	return result.Trades, nil
 }
 
-type LimitSellResult struct {
+type LimitResult struct {
 	Remaining *Order
 	Partial   *Order
 	Filled    []Order
 	Trades    []Trade
 }
 
-func (ob *Orderbook) calculateLimitSell(o *Order) (*LimitSellResult, error) {
+func (ob *Orderbook) calculateLimitBuy(o *Order) (*LimitResult, error) {
+	remainingQuantity := o.Quantity
+
+	filled := []Order{}
+	var partial *Order
+	// Matching orders required
+	// Calculate full matches
+	askQueue := ob.asks.Entries.Iterate()
+	for askNode := askQueue; !askNode.Done(); askNode.Next() {
+		// Get orders within a single bid/ask matching price
+		askPrice := askNode.GetKey()
+		if o.Price < askPrice {
+			break
+		}
+		fmt.Println("filling price", askPrice)
+		if remainingQuantity == 0 {
+			break
+		}
+		orderQueue := askNode.GetValue().Entries.Iterate()
+		for orderNode := orderQueue; !orderNode.Done(); orderNode.Next() {
+			// Match orders
+			if remainingQuantity == 0 {
+				break
+			}
+			matchedOrder := orderNode.GetValue()
+			matchedQuantity := matchedOrder.Quantity
+			if matchedOrder.Quantity > remainingQuantity {
+				matchedQuantity = matchedOrder.Quantity - remainingQuantity
+			}
+			fmt.Printf("\tmatching order %d, qty %d price %d\n", matchedOrder.ID, matchedQuantity, matchedOrder.Price)
+
+			if remainingQuantity < matchedOrder.Quantity {
+				partial = &Order{
+					ID:        matchedOrder.ID,
+					Type:      matchedOrder.Type,
+					Quantity:  matchedQuantity,
+					Price:     matchedOrder.Price,
+					CreatedAt: matchedOrder.CreatedAt,
+				}
+				remainingQuantity = 0
+				break
+			}
+			if remainingQuantity > matchedOrder.Quantity {
+				filled = append(filled, matchedOrder)
+				remainingQuantity -= matchedQuantity
+				continue
+			}
+
+			filled = append(filled, matchedOrder)
+			remainingQuantity = 0
+		}
+	}
+	var remainingOrder *Order
+	if remainingQuantity > 0 {
+		remainingOrder = &Order{
+			ID:        o.ID,
+			Type:      o.Type,
+			Quantity:  remainingQuantity,
+			Price:     o.Price,
+			CreatedAt: o.CreatedAt,
+		}
+	}
+
+	trades := []Trade{}
+	for _, filledOrder := range filled {
+		trades = append(trades, Trade{AskOrderID: filledOrder.ID, BidOrderID: o.ID, Amount: filledOrder.Quantity, Price: o.Price})
+	}
+	if partial != nil {
+		trades = append(trades, Trade{ID: uuid.Must(uuid.NewV4()), AskOrderID: partial.ID, BidOrderID: o.ID, Amount: partial.Quantity, Price: o.Price})
+	}
+	return &LimitResult{
+		Remaining: remainingOrder,
+		Partial:   partial,
+		Filled:    filled,
+		Trades:    trades,
+	}, nil
+}
+
+func (ob *Orderbook) calculateLimitSell(o *Order) (*LimitResult, error) {
 	remainingQuantity := o.Quantity
 	filled := []Order{}
 	var partial *Order
@@ -296,20 +411,27 @@ func (ob *Orderbook) calculateLimitSell(o *Order) (*LimitSellResult, error) {
 				break
 			}
 			matchedOrder := orderNode.GetValue()
-			fmt.Printf("matching order %d, qty %d price %d:", matchedOrder.ID, matchedOrder.Quantity, matchedOrder.Price)
+
+			matchedQuantity := matchedOrder.Quantity
+			if matchedOrder.Quantity > remainingQuantity {
+				matchedQuantity = matchedOrder.Quantity - remainingQuantity
+			}
+			fmt.Printf("\tmatching order %d, qty %d price %d:\n", matchedOrder.ID, matchedQuantity, matchedOrder.Price)
 			if remainingQuantity < matchedOrder.Quantity {
 				partial = &Order{
 					ID:        matchedOrder.ID,
 					Type:      matchedOrder.Type,
-					Quantity:  matchedOrder.Quantity - remainingQuantity,
+					Quantity:  matchedQuantity,
 					Price:     matchedOrder.Price,
 					CreatedAt: matchedOrder.CreatedAt,
 				}
-				remainingQuantity -= matchedOrder.Quantity
+				remainingQuantity = 0
+				break
 			}
 			if remainingQuantity > matchedOrder.Quantity {
 				filled = append(filled, matchedOrder)
-				remainingQuantity -= matchedOrder.Quantity
+				remainingQuantity -= matchedQuantity
+				break
 			}
 
 			filled = append(filled, matchedOrder)
@@ -335,7 +457,7 @@ func (ob *Orderbook) calculateLimitSell(o *Order) (*LimitSellResult, error) {
 		trades = append(trades, Trade{ID: uuid.Must(uuid.NewV4()), AskOrderID: o.ID, BidOrderID: partial.ID, Amount: partial.Quantity, Price: partial.Price})
 	}
 
-	return &LimitSellResult{
+	return &LimitResult{
 		Remaining: remainingOrder,
 		Partial:   partial,
 		Filled:    filled,
@@ -353,20 +475,29 @@ type Trade struct {
 
 type undoFn func()
 
-var emptyUndo undoFn = func() {}
-
 type Undo struct {
 	fns      []undoFn
 	hasError bool
 }
 
-func (u *Undo) HasError() {
+type UndoContextKey string
+
+const UndoKey UndoContextKey = "undo"
+
+func WithUndo(ctx context.Context) context.Context {
+	ctx = context.WithValue(ctx, UndoKey, &Undo{})
+	return ctx
+}
+func WithError(ctx context.Context) {
+	u := ctx.Value(UndoKey).(*Undo)
 	u.hasError = true
 }
-func (u *Undo) Append(fn func()) {
+func WithOp(ctx context.Context, fn func()) {
+	u := ctx.Value(UndoKey).(*Undo)
 	u.fns = append(u.fns, fn)
 }
-func (u *Undo) Rollback() error {
+func Rollback(ctx context.Context) error {
+	u := ctx.Value(UndoKey).(*Undo)
 	if u.hasError {
 		return ErrNoError
 	}
@@ -376,76 +507,97 @@ func (u *Undo) Rollback() error {
 	return nil
 }
 
-func (ob *Orderbook) orderUpsert(o Order, isUpdate bool, undoFns *Undo) error {
+// orderInsert a new order
+func (ob *Orderbook) orderInsert(ctx context.Context, o Order) error {
 	switch o.Type {
-	case LimitBuy:
+	case Bid:
 		oq, exists := ob.bids.Entries.Get(o.Price)
 		if !exists {
 			ob.bids.Entries = ob.bids.Entries.Insert(o.Price, oq)
-			undoFns.Append(func() { ob.bids.Entries = ob.bids.Entries.Remove(o.Price) })
+		}
+		oq.Entries = oq.Entries.Insert(o.ID, o)
+		ob.bids.Entries = ob.bids.Entries.Insert(o.Price, oq)
+		// oq.Size += o.Quantity
+		WithOp(ctx, func() { oq.Entries = oq.Entries.Remove(o.ID) })
+	case Ask:
+		oq, exists := ob.asks.Entries.Get(o.Price)
+		if !exists {
+			ob.asks.Entries = ob.asks.Entries.Insert(o.Price, oq)
+		}
+		oq.Entries = oq.Entries.Insert(o.ID, o)
+		ob.asks.Entries = ob.asks.Entries.Insert(o.Price, oq)
+		// oq.Size += o.Quantity
+		WithOp(ctx, func() { oq.Entries = oq.Entries.Remove(o.ID) })
+	}
+	return nil
+}
+
+// orderUpdate a specific order because it was partially filled
+func (ob *Orderbook) orderUpdate(ctx context.Context, o Order) error {
+	switch o.Type {
+	case Bid:
+		oq, exists := ob.bids.Entries.Get(o.Price)
+		if !exists {
+			ob.bids.Entries = ob.bids.Entries.Insert(o.Price, oq)
 		}
 		original, exists := oq.Entries.Get(o.ID)
 		if !exists {
-			undoFns.HasError()
-			return fmt.Errorf("get order: %w", ErrOrderNotExist)
+			WithError(ctx)
+			return fmt.Errorf("get order %d: %w", o.ID, ErrOrderNotExist)
 		}
 		oq.Entries = oq.Entries.Insert(o.ID, o)
-		if isUpdate {
-			undoFns.Append(func() { oq.Entries = oq.Entries.Insert(o.ID, original) })
-		} else {
-			undoFns.Append(func() { oq.Entries = oq.Entries.Remove(o.ID) })
-		}
-		return nil
-	case LimitSell:
+		ob.bids.Entries = ob.bids.Entries.Insert(o.Price, oq)
+		WithOp(ctx, func() { oq.Entries = oq.Entries.Insert(o.ID, original) })
+	case Ask:
 		oq, exists := ob.asks.Entries.Get(o.Price)
 		if !exists {
 			ob.asks.Entries = ob.asks.Entries.Insert(o.Price, oq)
 		}
 		original, exists := oq.Entries.Get(o.ID)
 		if !exists {
-			undoFns.HasError()
-			return fmt.Errorf("get order: %w", ErrOrderNotExist)
+			WithError(ctx)
+			return fmt.Errorf("get order %d: %w", o.ID, ErrOrderNotExist)
 		}
 		oq.Entries = oq.Entries.Insert(o.ID, o)
-		if isUpdate {
-			undoFns.Append(func() { oq.Entries = oq.Entries.Insert(o.ID, original) })
-		} else {
-			undoFns.Append(func() { oq.Entries = oq.Entries.Remove(o.ID) })
-		}
-		return nil
+		ob.asks.Entries = ob.asks.Entries.Insert(o.Price, oq)
+		WithOp(ctx, func() { oq.Entries = oq.Entries.Insert(o.ID, original) })
 	default:
 		return ErrInvalidSide
 	}
+	return nil
 }
-func (ob *Orderbook) orderRemove(o Order, undoFns *Undo) error {
+
+func (ob *Orderbook) orderRemove(ctx context.Context, o Order) error {
 	switch o.Type {
-	case LimitBuy:
+	case Bid:
 		oq, exists := ob.bids.Entries.Get(o.Price)
 		if !exists {
-			undoFns.HasError()
-			return fmt.Errorf("get orderqueue: %w", ErrOrderNotExist)
+			WithError(ctx)
+			return fmt.Errorf("get orderqueue: %w", ErrOrderQueueNotExist)
 		}
 		_, exists = oq.Entries.Get(o.ID)
 		if !exists {
-			undoFns.HasError()
-			return fmt.Errorf("get order: %w", ErrOrderNotExist)
+			WithError(ctx)
+			return fmt.Errorf("get order %d: %w", o.ID, ErrOrderNotExist)
 		}
 		oq.Entries = oq.Entries.Remove(o.ID)
-		undoFns.Append(func() { oq.Entries = oq.Entries.Insert(o.ID, o) })
+		ob.bids.Entries = ob.bids.Entries.Insert(o.Price, oq)
+		WithOp(ctx, func() { oq.Entries = oq.Entries.Insert(o.ID, o) })
 		return nil
-	case LimitSell:
+	case Ask:
 		oq, exists := ob.asks.Entries.Get(o.Price)
 		if !exists {
-			undoFns.HasError()
-			return fmt.Errorf("get orderqueue: %w", ErrOrderNotExist)
+			WithError(ctx)
+			return fmt.Errorf("get orderqueue: %w", ErrOrderQueueNotExist)
 		}
 		_, exists = oq.Entries.Get(o.ID)
 		if !exists {
-			undoFns.HasError()
-			return fmt.Errorf("get order: %w", ErrOrderNotExist)
+			WithError(ctx)
+			return fmt.Errorf("get order %d: %w", o.ID, ErrOrderNotExist)
 		}
 		oq.Entries = oq.Entries.Remove(o.ID)
-		undoFns.Append(func() { oq.Entries = oq.Entries.Insert(o.ID, o) })
+		ob.asks.Entries = ob.asks.Entries.Insert(o.Price, oq)
+		WithOp(ctx, func() { oq.Entries = oq.Entries.Insert(o.ID, o) })
 		return nil
 	default:
 		return ErrInvalidSide
@@ -459,33 +611,33 @@ func (ob *Orderbook) highestBid() (Order, error) {
 	return ob.bids.Entries.Max().V.Entries.Min().V, nil
 }
 func (ob *Orderbook) lowestAsk() (Order, error) {
-	if ob.bids.Entries.Len() <= 0 {
+	if ob.asks.Entries.Len() <= 0 {
 		return Order{}, ErrNoLiquidity
 	}
-	return ob.bids.Entries.Max().V.Entries.Min().V, nil
+	return ob.asks.Entries.Min().V.Entries.Max().V, nil
 }
-func (ob *Orderbook) processCancel(o *CancelOrder) error {
+func (ob *Orderbook) Cancel(o *Order) error {
 	var oq OrderQueue
 	exists := false
-	if o.Type == LimitBuy {
+	if o.Type == Bid {
 		oq, exists = ob.bids.Entries.Get(o.Price)
 		if !exists {
-			ob.errors <- ErrOrderNotExist
+			return fmt.Errorf("get order queue %s %d: %w", "bid", o.Price, ErrOrderQueueNotExist)
 		}
 	} else {
 		oq, exists = ob.asks.Entries.Get(o.Price)
 		if !exists {
-			ob.errors <- ErrOrderNotExist
+			return fmt.Errorf("get order queue %s %d: %w", "ask", o.Price, ErrOrderQueueNotExist)
 		}
 	}
 
 	_, exists = oq.Entries.Get(o.ID)
 	if !exists {
-		ob.errors <- ErrOrderNotExist
+		return fmt.Errorf("get order %d: %w", o.ID, ErrOrderNotExist)
 	}
 
 	oq.Entries = oq.Entries.Remove(o.ID)
-	if o.Type == LimitBuy {
+	if o.Type == Bid {
 		if oq.Entries.Len() == 0 {
 			// Empty order queue, remove completely
 			ob.bids.Entries = ob.bids.Entries.Remove(o.Price)
@@ -503,9 +655,27 @@ func (ob *Orderbook) processCancel(o *CancelOrder) error {
 	return nil
 }
 
-func (ob *Orderbook) processMarketSell(o *Order) error {
-	return ErrNotImplemented
+func (ob *Orderbook) MarketSell(orderID uint64, quantity uint64) ([]Trade, error) {
+	if ob.bids.Size < quantity {
+		return []Trade{}, ErrNoLiquidity
+	}
+	return ob.Add(&Order{
+		ID:        orderID,
+		Type:      Ask,
+		Quantity:  quantity,
+		Price:     0,
+		CreatedAt: time.Now(),
+	})
 }
-func (ob *Orderbook) processMarketBuy(o *Order) error {
-	return ErrNotImplemented
+func (ob *Orderbook) MarketBuy(orderID uint64, quantity uint64) ([]Trade, error) {
+	if ob.asks.Size < quantity {
+		return []Trade{}, ErrNoLiquidity
+	}
+	return ob.Add(&Order{
+		ID:        orderID,
+		Type:      Bid,
+		Quantity:  quantity,
+		Price:     math.MaxUint64,
+		CreatedAt: time.Now(),
+	})
 }

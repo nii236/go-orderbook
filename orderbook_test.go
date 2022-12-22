@@ -9,67 +9,229 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestOrderbook_Asks(t *testing.T) {
-	bidPriceMap := ob.NewPriceMap([]*ob.Order{})
-	askPriceMap := ob.NewPriceMap([]*ob.Order{})
-	book := ob.NewOrderbook("TEST", bidPriceMap, askPriceMap)
-	go book.Run()
-	err := book.Add(&ob.Order{
+func TestOrderbook_AddAsks(t *testing.T) {
+	book := ob.NewOrderbook("TEST")
+
+	_, err := book.Add(&ob.Order{
+		ID:        2,
+		Type:      ob.Ask,
+		Quantity:  1,
+		Price:     102,
+		CreatedAt: time.Now(),
+	})
+	assert.Nil(t, err)
+	trades, err := book.Add(&ob.Order{
 		ID:        1,
-		Type:      ob.LimitSell,
+		Type:      ob.Ask,
 		Quantity:  5,
 		Price:     102,
 		CreatedAt: time.Now(),
 	})
 
 	assert.Nil(t, err)
-	err = book.Add(&ob.Order{
+	askSize, asks := book.Asks()
+	assert.EqualValues(t, askSize, 6, "need more asks")
+	assert.Equal(t, len(asks), 2, "need more asks")
+	assert.Equal(t, len(trades), 0, "no trades expected")
+}
+func TestOrderbook_AddBids(t *testing.T) {
+	book := ob.NewOrderbook("TEST")
+	_, err := book.Add(&ob.Order{
+		ID:        1,
+		Type:      ob.Ask,
+		Quantity:  5,
+		Price:     102,
+		CreatedAt: time.Now(),
+	})
+
+	assert.Nil(t, err)
+	trades, err := book.Add(&ob.Order{
 		ID:        2,
-		Type:      ob.LimitSell,
+		Type:      ob.Ask,
 		Quantity:  1,
 		Price:     102,
 		CreatedAt: time.Now(),
 	})
 	assert.Nil(t, err)
+	askSize, asks := book.Asks()
+	assert.EqualValues(t, askSize, 6, "need more asks")
+	assert.Equal(t, len(asks), 2, "need more asks")
+	assert.Equal(t, len(trades), 0, "no trades expected")
+}
+func TestOrderbook_MarketBuy(t *testing.T) {
+	book := ob.NewOrderbook("TEST")
+	_, err := book.Add(&ob.Order{
+		ID:        1,
+		Type:      ob.Ask,
+		Quantity:  2,
+		Price:     99,
+		CreatedAt: time.Now(),
+	})
+	assert.Nil(t, err)
+	_, err = book.Add(&ob.Order{
+		ID:        2,
+		Type:      ob.Ask,
+		Quantity:  2,
+		Price:     100,
+		CreatedAt: time.Now(),
+	})
+	assert.Nil(t, err)
+	_, err = book.MarketBuy(3, 5)
+	assert.NotNil(t, err)
+	trades, err := book.MarketBuy(3, 4)
+	assert.Nil(t, err)
+	bidSize, _ := book.Bids()
+	askSize, _ := book.Asks()
+	assert.Equal(t, 2, len(trades), "expected 2 trade")
+	assert.EqualValues(t, 0, bidSize, "bidqueue not empty")
+	assert.EqualValues(t, 0, askSize, "askqueue not empty")
+}
+func TestOrderbook_MarketSell(t *testing.T) {
+	book := ob.NewOrderbook("TEST")
+	_, err := book.Add(&ob.Order{
+		ID:        1,
+		Type:      ob.Bid,
+		Quantity:  2,
+		Price:     99,
+		CreatedAt: time.Now(),
+	})
+	assert.Nil(t, err)
+	_, err = book.Add(&ob.Order{
+		ID:        2,
+		Type:      ob.Bid,
+		Quantity:  2,
+		Price:     100,
+		CreatedAt: time.Now(),
+	})
+	assert.Nil(t, err)
+	_, err = book.MarketSell(3, 5)
+	assert.NotNil(t, err)
+	trades, err := book.MarketSell(3, 4)
+	assert.Nil(t, err)
+	bidSize, _ := book.Bids()
+	askSize, _ := book.Asks()
+	assert.Equal(t, 2, len(trades), "expected 2 trade")
+	assert.EqualValues(t, 0, bidSize, "bidqueue not empty")
+	assert.EqualValues(t, 0, askSize, "askqueue not empty")
+}
+func TestOrderbook_PartialFilledBid(t *testing.T) {
+	book := ob.NewOrderbook("TEST")
+	_, err := book.Add(&ob.Order{
+		ID:        1,
+		Type:      ob.Bid,
+		Quantity:  2,
+		Price:     99,
+		CreatedAt: time.Now(),
+	})
+	assert.Nil(t, err)
+	_, err = book.Add(&ob.Order{
+		ID:        2,
+		Type:      ob.Bid,
+		Quantity:  2,
+		Price:     100,
+		CreatedAt: time.Now(),
+	})
+	assert.Nil(t, err)
+	trades, err := book.Add(&ob.Order{
+		ID:        3,
+		Type:      ob.Ask,
+		Quantity:  3,
+		Price:     98,
+		CreatedAt: time.Now(),
+	})
+	assert.Nil(t, err)
+	bidSize, _ := book.Bids()
+	askSize, _ := book.Asks()
+	assert.EqualValues(t, 1, bidSize, "need more bids")
+	assert.EqualValues(t, 0, askSize, "need zero asks")
+	assert.Equal(t, 2, len(trades), "expected 2 trade")
 	fmt.Println(book)
 }
-func TestOrderbook_LimitSell(t *testing.T) {
-	emptyPriceMap := ob.NewPriceMap([]*ob.Order{})
-	book := ob.NewOrderbook("TEST", emptyPriceMap, emptyPriceMap)
-	go book.Run()
-	err := book.Add(&ob.Order{
+func TestOrderbook_FilledBid(t *testing.T) {
+	book := ob.NewOrderbook("TEST")
+	_, err := book.Add(&ob.Order{
 		ID:        1,
-		Type:      ob.LimitSell,
+		Type:      ob.Bid,
 		Quantity:  1,
 		Price:     100,
 		CreatedAt: time.Now(),
 	})
-	fmt.Println("err test ", err)
 	assert.Nil(t, err)
-	assert.Equal(t, 1, len(book.Asks()), "expected order to be added to book")
-
+	trades, err := book.Add(&ob.Order{
+		ID:        2,
+		Type:      ob.Ask,
+		Quantity:  1,
+		Price:     99,
+		CreatedAt: time.Now(),
+	})
+	assert.Nil(t, err)
+	assert.Equal(t, 1, len(trades), "expected 1 trade")
+}
+func TestOrderbook_PartialFilledAsk(t *testing.T) {
+	book := ob.NewOrderbook("TEST")
+	_, err := book.Add(&ob.Order{
+		ID:        1,
+		Type:      ob.Ask,
+		Quantity:  2,
+		Price:     99,
+		CreatedAt: time.Now(),
+	})
+	assert.Nil(t, err)
+	_, err = book.Add(&ob.Order{
+		ID:        2,
+		Type:      ob.Ask,
+		Quantity:  2,
+		Price:     100,
+		CreatedAt: time.Now(),
+	})
+	assert.Nil(t, err)
+	trades, err := book.Add(&ob.Order{
+		ID:        3,
+		Type:      ob.Bid,
+		Quantity:  3,
+		Price:     105,
+		CreatedAt: time.Now(),
+	})
+	assert.Nil(t, err)
+	bidSize, _ := book.Bids()
+	askSize, _ := book.Asks()
+	fmt.Println(book)
+	assert.EqualValues(t, 1, askSize, "need more asks")
+	assert.EqualValues(t, 0, bidSize, "need zero bids")
+	assert.Equal(t, 2, len(trades), "expected 1 trade")
+}
+func TestOrderbook_FilledAsk(t *testing.T) {
+	book := ob.NewOrderbook("TEST")
+	_, err := book.Add(&ob.Order{
+		ID:        1,
+		Type:      ob.Ask,
+		Quantity:  1,
+		Price:     100,
+		CreatedAt: time.Now(),
+	})
+	assert.Nil(t, err)
+	trades, err := book.Add(&ob.Order{
+		ID:        2,
+		Type:      ob.Bid,
+		Quantity:  1,
+		Price:     101,
+		CreatedAt: time.Now(),
+	})
+	assert.Nil(t, err)
+	assert.Equal(t, 1, len(trades), "expected 1 trade")
 }
 func TestOrderbook_Cancel(t *testing.T) {
 	type fields struct {
-		bids *ob.PriceMap
-		asks *ob.PriceMap
+		orders []*ob.Order
 	}
 	type args struct {
-		o *ob.CancelOrder
+		o *ob.Order
 	}
-	emptyPriceMap := ob.NewPriceMap([]*ob.Order{})
-	existingPriceMap := ob.NewPriceMap([]*ob.Order{
-		{
-			ID:        1,
-			Type:      ob.LimitBuy,
-			Quantity:  1,
-			Price:     100,
-			CreatedAt: time.Now(),
-		},
-	})
-	cancelOrder := &ob.CancelOrder{1, ob.LimitBuy, 100}
-	cancelMissingOrder := &ob.CancelOrder{2, ob.LimitBuy, 100}
-	cancelOrderWrongSide := &ob.CancelOrder{1, ob.LimitSell, 100}
+	bidOrder := &ob.Order{ID: 1, Type: ob.Bid, Quantity: 1, Price: 100, CreatedAt: time.Now()}
+	askOrder := &ob.Order{ID: 1, Type: ob.Ask, Quantity: 1, Price: 100, CreatedAt: time.Now()}
+	cancelBidOrder := &ob.Order{1, ob.Bid, 1, 100, time.Now()}
+	cancelAskOrder := &ob.Order{1, ob.Ask, 1, 100, time.Now()}
+	cancelMissingOrder := &ob.Order{2, ob.Bid, 100, 10, time.Now()}
 	tests := []struct {
 		name        string
 		fields      fields
@@ -78,24 +240,26 @@ func TestOrderbook_Cancel(t *testing.T) {
 		wantLenBids int
 		wantLenAsks int
 	}{
-		{"nil order", fields{bids: emptyPriceMap, asks: emptyPriceMap}, args{}, true, 0, 0},
-		{"empty book", fields{bids: emptyPriceMap, asks: emptyPriceMap}, args{cancelOrder}, true, 0, 0},
-		{"order exists", fields{bids: existingPriceMap, asks: emptyPriceMap}, args{cancelOrder}, false, 0, 0},
-		{"order exists, wrong side", fields{bids: existingPriceMap, asks: emptyPriceMap}, args{cancelOrderWrongSide}, true, 1, 0},
-		{"order missing", fields{bids: existingPriceMap, asks: emptyPriceMap}, args{cancelMissingOrder}, true, 1, 0},
+		{"empty book", fields{orders: []*ob.Order{}}, args{cancelBidOrder}, true, 0, 0},
+		{"bid order exists", fields{orders: []*ob.Order{bidOrder}}, args{cancelBidOrder}, false, 0, 0},
+		{"ask order exists", fields{orders: []*ob.Order{askOrder}}, args{cancelAskOrder}, false, 0, 0},
+		{"ask order exists, wrong side", fields{orders: []*ob.Order{askOrder}}, args{cancelBidOrder}, true, 1, 0},
+		{"order missing", fields{orders: []*ob.Order{}}, args{cancelMissingOrder}, true, 1, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ob := ob.NewOrderbook("TEST", tt.fields.bids, tt.fields.asks)
-
-			go ob.Run()
-			if err := ob.Cancel(tt.args.o); (err != nil) != tt.wantErr {
-				t.Errorf("ob.Cancel() error = %v, wantErr %v", err, tt.wantErr)
+			book := ob.NewOrderbook("TEST")
+			for _, o := range tt.fields.orders {
+				_, err := book.Add(o)
+				assert.Nil(t, err)
+			}
+			if err := book.Cancel(tt.args.o); (err != nil) != tt.wantErr {
+				t.Errorf("book.Cancel() error = %v, wantErr %v", err, tt.wantErr)
 			}
 
 			if !tt.wantErr {
-				bids := ob.Bids()
-				asks := ob.Asks()
+				_, bids := book.Bids()
+				_, asks := book.Asks()
 				if len(bids) != tt.wantLenBids {
 					t.Errorf("wrong bid length, got %v want %v", len(bids), tt.wantLenBids)
 				}
