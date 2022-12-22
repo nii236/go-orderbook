@@ -2,12 +2,40 @@ package orderbook_test
 
 import (
 	"fmt"
+	"math/rand"
 	ob "orderbook"
-	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
+	"go.uber.org/atomic"
+
+	"testing"
+	"time"
 )
+
+func BenchmarkOrderbook(b *testing.B) {
+	var orderID atomic.Uint64
+	book := ob.NewOrderbook("TEST")
+	for n := 0; n < b.N; n++ {
+		qty := uint64(rand.Intn(20)) + 1
+		price := 90 + uint64(rand.Intn(20))
+		book.Add(&ob.Order{
+			ID:        orderID.Add(1),
+			Type:      ob.Ask,
+			Quantity:  qty,
+			Price:     price,
+			CreatedAt: time.Now(),
+		})
+		qty = uint64(rand.Intn(20)) + 1
+		price = 93 + uint64(rand.Intn(20))
+		book.Add(&ob.Order{
+			ID:        orderID.Add(1),
+			Type:      ob.Bid,
+			Quantity:  qty,
+			Price:     price,
+			CreatedAt: time.Now(),
+		})
+	}
+}
 
 func TestOrderbook_AddAsks(t *testing.T) {
 	book := ob.NewOrderbook("TEST")
