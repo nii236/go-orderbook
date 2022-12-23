@@ -78,12 +78,12 @@ func NewOrderbook(symbol string) *Orderbook {
 		asks:   NewPriceMap([]*Order{}),
 		addCh:  make(chan func()),
 	}
-	go ob.Run()
+	go ob.run()
 	return ob
 }
 
-// Run is automatically called on NewOrderbook to start listening for order add and cancel requests
-func (ob *Orderbook) Run() {
+// run is automatically called on NewOrderbook to start listening for order add and cancel requests
+func (ob *Orderbook) run() {
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Println("Recovered in f", r)
