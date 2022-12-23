@@ -322,6 +322,7 @@ func (ob *Orderbook) calculateLimitBuy(o *Order) *LimitResult {
 
 	filled := []Order{}
 	var partial *Order
+	partialTradeQuantity := uint64(0)
 	// Matching orders required
 	// Calculate full matches
 	askQueue := ob.asks.Entries.Iterate()
@@ -354,6 +355,7 @@ func (ob *Orderbook) calculateLimitBuy(o *Order) *LimitResult {
 					Price:     matchedOrder.Price,
 					CreatedAt: matchedOrder.CreatedAt,
 				}
+				partialTradeQuantity = remainingQuantity
 				remainingQuantity = 0
 				break
 			}
@@ -383,7 +385,7 @@ func (ob *Orderbook) calculateLimitBuy(o *Order) *LimitResult {
 		trades = append(trades, Trade{AskOrderID: filledOrder.ID, BidOrderID: o.ID, Quantity: filledOrder.Quantity, Price: filledOrder.Price})
 	}
 	if partial != nil {
-		trades = append(trades, Trade{ID: uuid.Must(uuid.NewV4()), AskOrderID: partial.ID, BidOrderID: o.ID, Quantity: partial.Quantity, Price: partial.Price})
+		trades = append(trades, Trade{ID: uuid.Must(uuid.NewV4()), AskOrderID: partial.ID, BidOrderID: o.ID, Quantity: partialTradeQuantity, Price: partial.Price})
 	}
 	return &LimitResult{
 		Remaining: remainingOrder,
@@ -397,6 +399,7 @@ func (ob *Orderbook) calculateLimitSell(o *Order) *LimitResult {
 	remainingQuantity := o.Quantity
 	filled := []Order{}
 	var partial *Order
+	partialTradeQuantity := uint64(0)
 	// Matching orders required
 	// Calculate full matches
 	bidQueue := ob.bids.Entries.IterateReverse()
@@ -429,6 +432,7 @@ func (ob *Orderbook) calculateLimitSell(o *Order) *LimitResult {
 					Price:     matchedOrder.Price,
 					CreatedAt: matchedOrder.CreatedAt,
 				}
+				partialTradeQuantity = remainingQuantity
 				remainingQuantity = 0
 				break
 			}
@@ -458,7 +462,7 @@ func (ob *Orderbook) calculateLimitSell(o *Order) *LimitResult {
 		trades = append(trades, Trade{AskOrderID: o.ID, BidOrderID: filledOrder.ID, Quantity: filledOrder.Quantity, Price: filledOrder.Price})
 	}
 	if partial != nil {
-		trades = append(trades, Trade{ID: uuid.Must(uuid.NewV4()), AskOrderID: o.ID, BidOrderID: partial.ID, Quantity: partial.Quantity, Price: partial.Price})
+		trades = append(trades, Trade{ID: uuid.Must(uuid.NewV4()), AskOrderID: o.ID, BidOrderID: partial.ID, Quantity: partialTradeQuantity, Price: partial.Price})
 	}
 
 	return &LimitResult{

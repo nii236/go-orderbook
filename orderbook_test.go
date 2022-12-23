@@ -1,6 +1,7 @@
 package orderbook_test
 
 import (
+	"fmt"
 	"math/rand"
 	ob "orderbook"
 
@@ -146,7 +147,7 @@ func TestOrderbook_PartialFilledBid(t *testing.T) {
 	_, err := book.Add(&ob.Order{
 		ID:        1,
 		Type:      ob.Bid,
-		Quantity:  2,
+		Quantity:  5,
 		Price:     99,
 		CreatedAt: time.Now(),
 	})
@@ -167,11 +168,15 @@ func TestOrderbook_PartialFilledBid(t *testing.T) {
 		CreatedAt: time.Now(),
 	})
 	assert.Nil(t, err)
-	bidSize, _ := book.Bids()
+	bidSize, bids := book.Bids()
 	askSize, _ := book.Asks()
-	assert.EqualValues(t, 1, bidSize, "need more bids")
+	fmt.Println(book)
+	assert.Equal(t, 1, len(bids), "need more bids")
+	assert.EqualValues(t, 4, bidSize, "need more bid size")
 	assert.EqualValues(t, 0, askSize, "need zero asks")
 	assert.Equal(t, 2, len(trades), "expected 2 trade")
+	assert.EqualValues(t, 3, trades[0].Quantity+trades[1].Quantity, "trades should total qty 3")
+	assert.EqualValues(t, 1, trades[1].Quantity, "1 trade amount expected for second trade")
 }
 func TestOrderbook_FilledBid(t *testing.T) {
 	book := ob.NewOrderbook("TEST")
@@ -196,34 +201,37 @@ func TestOrderbook_FilledBid(t *testing.T) {
 func TestOrderbook_PartialFilledAsk(t *testing.T) {
 	book := ob.NewOrderbook("TEST")
 	_, err := book.Add(&ob.Order{
-		ID:        1,
+		ID:        2,
 		Type:      ob.Ask,
-		Quantity:  2,
-		Price:     99,
+		Quantity:  3,
+		Price:     100,
 		CreatedAt: time.Now(),
 	})
 	assert.Nil(t, err)
 	_, err = book.Add(&ob.Order{
-		ID:        2,
+		ID:        1,
 		Type:      ob.Ask,
-		Quantity:  2,
-		Price:     100,
+		Quantity:  5,
+		Price:     99,
 		CreatedAt: time.Now(),
 	})
 	assert.Nil(t, err)
 	trades, err := book.Add(&ob.Order{
 		ID:        3,
 		Type:      ob.Bid,
-		Quantity:  3,
+		Quantity:  6,
 		Price:     105,
 		CreatedAt: time.Now(),
 	})
 	assert.Nil(t, err)
 	bidSize, _ := book.Bids()
-	askSize, _ := book.Asks()
-	assert.EqualValues(t, 1, askSize, "need more asks")
+	askSize, asks := book.Asks()
+	assert.Equal(t, 1, len(asks), "need more asks")
+	assert.EqualValues(t, 2, askSize, "need more ask size")
 	assert.EqualValues(t, 0, bidSize, "need zero bids")
-	assert.Equal(t, 2, len(trades), "expected 1 trade")
+	assert.Equal(t, 2, len(trades), "expected 2 trade")
+	assert.EqualValues(t, 6, trades[0].Quantity+trades[1].Quantity, "trades should total qty 6")
+	assert.EqualValues(t, 1, trades[1].Quantity, "different trade amount expected for second trade")
 }
 func TestOrderbook_FilledAsk(t *testing.T) {
 	book := ob.NewOrderbook("TEST")

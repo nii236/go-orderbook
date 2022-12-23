@@ -8,6 +8,8 @@ require (
 	github.com/gofrs/uuid v4.3.1+incompatible
 	github.com/stretchr/testify v1.7.0
 	go.uber.org/atomic v1.10.0
+	golang.org/x/exp v0.0.0-20221217163422-3c43f8badb15
+	gonum.org/v1/gonum v0.12.0
 )
 
 require (

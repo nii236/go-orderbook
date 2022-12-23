@@ -9,6 +9,8 @@ import (
 	"sync"
 
 	"go.uber.org/atomic"
+	xrand "golang.org/x/exp/rand"
+	"gonum.org/v1/gonum/stat/distuv"
 
 	"time"
 
@@ -54,6 +56,15 @@ func main() {
 		return
 	}
 	bids, asks := book.Map()
+	source := xrand.NewSource(uint64(time.Now().UnixNano()))
+	poissonBid := distuv.Poisson{
+		Lambda: 100.0,
+		Src:    source,
+	}
+	poissonAsk := distuv.Poisson{
+		Lambda: 100.0,
+		Src:    source,
+	}
 
 	if err := ui.Init(); err != nil {
 		log.Fatalf("failed to initialize termui: %v", err)
@@ -64,7 +75,7 @@ func main() {
 	bc.Data = Data(bids, asks)
 	bc.Labels = Labels(bids, asks)
 	bc.Title = "Orderbook"
-	bc.SetRect(0, 0, 100, 25)
+	bc.SetRect(0, 0, 170, 25)
 	bc.BarWidth = 3
 	bc.BarColors = BarColors(bids, asks)
 	bc.LabelStyles = []ui.Style{ui.NewStyle(ui.ColorBlue)}
@@ -75,14 +86,15 @@ func main() {
 	l.Rows = []string{}
 	l.TextStyle = ui.NewStyle(ui.ColorYellow)
 	l.WrapText = false
-	l.SetRect(0, 25, 50, 50)
+	l.SetRect(0, 25, 170, 50)
 
 	l2 := widgets.NewList()
 	l2.Title = "Trades [0]"
 	l2.Rows = []string{}
 	l2.TextStyle = ui.NewStyle(ui.ColorYellow)
 	l2.WrapText = false
-	l2.SetRect(50, 25, 100, 50)
+	l2.SetRect(50, 25, 170, 50)
+
 	// bidT := time.NewTicker(1 * time.Millisecond)
 	// askT := time.NewTicker(1 * time.Millisecond)
 	renderT := time.NewTicker(1 * time.Millisecond)
@@ -108,16 +120,17 @@ func main() {
 	}()
 	go func() {
 		for {
-
 			mutex.Lock()
-			targetPrice, err := book.HighestBid()
-			if err != nil {
-				targetPrice = 100
-			}
+			// time.Sleep(1 * time.Second)
 			qty := uint64(rand.Intn(20)) + 1
-			price := targetPrice - 20 + uint64(rand.Intn(30))
-			if price > 110 || price < 90 {
-				price = 100
+			price := uint64(poissonBid.Rand())
+			if price < 85 {
+				mutex.Unlock()
+				continue
+			}
+			if price > 125 {
+				mutex.Unlock()
+				continue
 			}
 			book.HighestBid()
 			trades, err := book.Add(&ob.Order{
@@ -148,14 +161,16 @@ func main() {
 	go func() {
 		for {
 			mutex.Lock()
-			targetPrice, err := book.LowestAsk()
-			if err != nil {
-				targetPrice = 100
-			}
+			// time.Sleep(1 * time.Second)
 			qty := uint64(rand.Intn(20)) + 1
-			price := targetPrice + 20 - uint64(rand.Intn(35))
-			if price > 110 || price < 90 {
-				price = 100
+			price := uint64(poissonAsk.Rand())
+			if price < 85 {
+				mutex.Unlock()
+				continue
+			}
+			if price > 125 {
+				mutex.Unlock()
+				continue
 			}
 			trades, err := book.Add(&ob.Order{
 				ID:        orderID.Add(1),
