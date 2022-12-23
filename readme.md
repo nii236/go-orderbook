@@ -3,6 +3,10 @@
 This is a library that implements an orderbook for traditional CEX type exchanges. Some features:
 
 - Threadsafe via anonymous functions passed into channels
+- Limit order processing:
+  - Trades
+  - Filled orders
+  - Partially filled orders
 - In-memory rollback functionality on error
 - Ordered map to track prices
 - Ordered map to track order queue for each price
