@@ -39,7 +39,6 @@ func BenchmarkOrderbook(b *testing.B) {
 
 func TestOrderbook_AddAsks(t *testing.T) {
 	book := ob.NewOrderbook("TEST")
-
 	_, err := book.Add(&ob.Order{
 		ID:        2,
 		Type:      ob.Ask,
@@ -55,12 +54,13 @@ func TestOrderbook_AddAsks(t *testing.T) {
 		Price:     102,
 		CreatedAt: time.Now(),
 	})
-
 	assert.Nil(t, err)
+
 	askSize, asks := book.Asks()
-	assert.EqualValues(t, askSize, 6, "need more asks")
-	assert.Equal(t, len(asks), 2, "need more asks")
-	assert.Equal(t, len(trades), 0, "no trades expected")
+	fmt.Println(book)
+	assert.EqualValues(t, askSize, 6, "need more ask volume")
+	assert.Equal(t, 2, len(asks), "need more asks")
+	assert.Equal(t, 0, len(trades), "no trades expected")
 }
 func TestOrderbook_AddBids(t *testing.T) {
 	book := ob.NewOrderbook("TEST")
