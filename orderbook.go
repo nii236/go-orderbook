@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"runtime/debug"
 	"time"
 
 	"github.com/edofic/go-ordmap/v2"
@@ -86,8 +87,11 @@ func NewOrderbook(symbol string) *Orderbook {
 func (ob *Orderbook) run() {
 	defer func() {
 		if r := recover(); r != nil {
+
 			fmt.Println("Recovered in f", r)
+			fmt.Println(string(debug.Stack()))
 			fmt.Println(ob)
+
 		}
 	}()
 	for fn := range ob.addCh {
@@ -558,6 +562,9 @@ func Rollback(ctx context.Context) error {
 	if !u.hasError {
 		return ErrNoError
 	}
+	if u.fns == nil {
+		return nil
+	}
 	for i := len(u.fns) - 1; i >= 0; i-- {
 		u.fns[i]()
 	}
@@ -576,6 +583,7 @@ func (ob *Orderbook) orderInsert(ctx context.Context, o Order) {
 		oq.Size += o.Quantity
 		ob.bids.Entries = ob.bids.Entries.Insert(o.Price, oq)
 		WithUndoOp(ctx, func() {
+			oq, _ = ob.bids.Entries.Get(o.Price)
 			oq.Size -= o.Quantity
 			oq.Entries = oq.Entries.Remove(o.ID)
 			ob.bids.Entries = ob.bids.Entries.Insert(o.Price, oq)
@@ -589,6 +597,7 @@ func (ob *Orderbook) orderInsert(ctx context.Context, o Order) {
 		oq.Size += o.Quantity
 		ob.asks.Entries = ob.asks.Entries.Insert(o.Price, oq)
 		WithUndoOp(ctx, func() {
+			oq, _ = ob.asks.Entries.Get(o.Price)
 			oq.Size -= o.Quantity
 			oq.Entries = oq.Entries.Remove(o.ID)
 			ob.asks.Entries = ob.asks.Entries.Insert(o.Price, oq)
@@ -613,6 +622,7 @@ func (ob *Orderbook) orderUpdate(ctx context.Context, o Order) error {
 		oq.Size -= original.Quantity - o.Quantity
 		ob.bids.Entries = ob.bids.Entries.Insert(o.Price, oq)
 		WithUndoOp(ctx, func() {
+			oq, _ = ob.bids.Entries.Get(o.Price)
 			oq.Size += original.Quantity - o.Quantity
 			oq.Entries = oq.Entries.Insert(o.ID, original)
 			ob.bids.Entries = ob.bids.Entries.Insert(o.Price, oq)
@@ -631,6 +641,7 @@ func (ob *Orderbook) orderUpdate(ctx context.Context, o Order) error {
 		oq.Size -= original.Quantity - o.Quantity
 		ob.asks.Entries = ob.asks.Entries.Insert(o.Price, oq)
 		WithUndoOp(ctx, func() {
+			oq, _ = ob.asks.Entries.Get(o.Price)
 			oq.Size += original.Quantity - o.Quantity
 			oq.Entries = oq.Entries.Insert(o.ID, original)
 			ob.asks.Entries = ob.asks.Entries.Insert(o.Price, oq)
@@ -659,6 +670,7 @@ func (ob *Orderbook) orderRemove(ctx context.Context, o Order) error {
 		oq.Size -= o.Quantity
 		ob.bids.Entries = ob.bids.Entries.Insert(o.Price, oq)
 		WithUndoOp(ctx, func() {
+			oq, _ = ob.bids.Entries.Get(o.Price)
 			oq.Size += o.Quantity
 			oq.Entries = oq.Entries.Insert(o.ID, o)
 			ob.bids.Entries = ob.bids.Entries.Insert(o.Price, oq)
@@ -679,6 +691,7 @@ func (ob *Orderbook) orderRemove(ctx context.Context, o Order) error {
 		oq.Size -= o.Quantity
 		ob.asks.Entries = ob.asks.Entries.Insert(o.Price, oq)
 		WithUndoOp(ctx, func() {
+			oq, _ = ob.asks.Entries.Get(o.Price)
 			oq.Size += o.Quantity
 			oq.Entries = oq.Entries.Insert(o.ID, o)
 			ob.asks.Entries = ob.asks.Entries.Insert(o.Price, oq)
@@ -694,7 +707,7 @@ func (ob *Orderbook) HighestBid() (uint64, error) {
 	if ob.bids.Entries.Len() <= 0 {
 		return 0, ErrNoLiquidity
 	}
-	return ob.bids.Entries.Max().V.Entries.Min().V.Price, nil
+	return ob.bids.Entries.Max().K, nil
 }
 
 // LowestAsk returns the price of the lowest ask, and error if there aren't any asks
@@ -702,7 +715,8 @@ func (ob *Orderbook) LowestAsk() (uint64, error) {
 	if ob.asks.Entries.Len() <= 0 {
 		return 0, ErrNoLiquidity
 	}
-	return ob.asks.Entries.Min().V.Entries.Min().V.Price, nil
+
+	return ob.asks.Entries.Min().K, nil
 }
 
 // Cancel an order, threadsafe
